@@ -1,365 +1,406 @@
 import os
 import io
 import json
-import base64
-import time
+import traceback
 import numpy as np
-import cv2
 import torch
-from PIL import Image
-from flask import Flask, request, jsonify, render_template, send_from_directory
-from flask_cors import CORS
+from PIL import Image, ImageDraw, ImageFont
+import streamlit as st
 from facenet_pytorch import MTCNN, InceptionResnetV1, extract_face, fixed_image_standardization
 
 # -------------------------------------------------------------------------
-# App Initialization & Configuration
+# Page Configuration & Styling
 # -------------------------------------------------------------------------
-app = Flask(__name__, static_folder="static", template_folder="templates")
-CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max
-
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch.set_grad_enabled(False)
-torch.set_num_threads(min(8, os.cpu_count() or 4))
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODELS_DIR = os.path.join(BASE_DIR, "models")
-DATA_DIR = os.path.join(BASE_DIR, "data")
-NPZ_PATH = os.path.join(MODELS_DIR, "cricket_face_embeddings.npz")
-DATABASE_PATH = os.path.join(DATA_DIR, "player_database.json")
-
-# Global Cache
-player_database = {}
-player_centroids = None
-player_exemplars = None
-player_labels = None
-player_names = []
-player_slug_to_index = {}
-player_exemplar_indices = []
-
-print(f"[+] Starting Cricket Face AI engine on device: {DEVICE}")
-
-# -------------------------------------------------------------------------
-# Load Models & Database
-# -------------------------------------------------------------------------
-print("[+] Loading Neural Networks (MTCNN Face Detector & InceptionResnetV1)...")
-mtcnn_detector = MTCNN(
-    keep_all=True, 
-    select_largest=False, 
-    post_process=True, 
-    min_face_size=30,
-    device=DEVICE
+st.set_page_config(
+    page_title="Indian Cricketers Face Identification",
+    page_icon="🏏",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-embedding_net = InceptionResnetV1(pretrained='vggface2').eval().to(DEVICE)
 
-def load_resources():
-    global player_database, player_centroids, player_exemplars, player_labels, player_names, player_slug_to_index, player_exemplar_indices
-    
-    # 1. Load player database
-    if os.path.exists(DATABASE_PATH):
-        with open(DATABASE_PATH, "r", encoding="utf-8") as f:
-            player_database = json.load(f)
-        print(f"[+] Loaded {len(player_database)} player dossiers from database.")
-    else:
-        print(f"[!] Warning: Database not found at {DATABASE_PATH}")
+# Custom CSS for Lord's Claret & Gold Cricket Aesthetic
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-    # 2. Load trained embeddings
-    if os.path.exists(NPZ_PATH):
-        data = np.load(NPZ_PATH, allow_pickle=True)
-        player_centroids = data['centroids'] # [324, 512]
-        player_exemplars = data.get('exemplars', None)
-        player_labels = data.get('labels', None)
-        player_names = list(data['players'])
-        player_slug_to_index = {name.lower().replace(' ', '_'): i for i, name in enumerate(player_names)}
-        
-        # Precompute exemplar slices for ultra-fast lookup (0ms per request)
-        if player_exemplars is not None and player_labels is not None:
-            player_exemplar_indices = [np.where(player_labels == i)[0] for i in range(len(player_names))]
-        else:
-            player_exemplar_indices = []
-            
-        print(f"[+] Loaded embeddings for {len(player_names)} cricketers from {NPZ_PATH}")
-    else:
-        print(f"[!] Embeddings file {NPZ_PATH} not yet built. Predictions will wait or use fallback.")
-
-load_resources()
-
-# -------------------------------------------------------------------------
-# Helper Functions
-# -------------------------------------------------------------------------
-def calibrate_confidence(similarity_score):
-    """
-    Converts cosine similarity [-1.0, 1.0] into an intuitive confidence percentage [0% - 99%].
-    Threshold for match: ~0.45.
-    Similarity > 0.70 gives > 82% confidence.
-    Similarity > 0.85 gives > 94% confidence.
-    Similarity < 0.35 gives < 25% confidence (triggers database warning).
-    """
-    if similarity_score >= 0.85:
-        conf = 0.94 + (similarity_score - 0.85) * 0.35
-    elif similarity_score >= 0.70:
-        conf = 0.82 + (similarity_score - 0.70) * 0.80
-    elif similarity_score >= 0.58:
-        conf = 0.65 + (similarity_score - 0.58) * 1.41
-    elif similarity_score >= 0.45:
-        conf = 0.45 + (similarity_score - 0.45) * 1.53
-    elif similarity_score >= 0.30:
-        conf = 0.20 + (similarity_score - 0.30) * 1.66
-    else:
-        conf = max(0.05, similarity_score * 0.6)
-    return float(np.clip(conf, 0.05, 0.994))
-
-def get_player_dossier(folder_name):
-    """Fetches formatted dossier or builds a default fallback."""
-    if folder_name in player_database:
-        return player_database[folder_name]
-        
-    for k, v in player_database.items():
-        if k.lower() == folder_name.lower() or v.get("display_name", "").lower() == folder_name.lower():
-            return v
-            
-    clean = folder_name.strip()
-    return {
-        "id": clean.lower().replace(" ", "_"),
-        "folder_name": folder_name,
-        "display_name": clean,
-        "role": "Cricket Star",
-        "role_badge": "CRICKETER",
-        "active_era": "Domestic & International",
-        "batting_style": "Right-hand bat",
-        "bowling_style": "Right-arm medium",
-        "career_matches": "Tests, ODIs, T20s",
-        "key_teams": "Indian Cricket Federation, Franchise",
-        "best_performance": "High impact international & domestic performance",
-        "career_highlights": [
-            "Featured in the elite Indian cricketer identification repository",
-            "Consistent contributions across competitive cricket formats",
-            "High athletic proficiency and match temperament"
-        ],
-        "biography": f"{clean} is an accomplished Indian cricketer recognized in the national roster."
+    .stApp {
+        background: radial-gradient(circle at 50% 0%, #152445 0%, #070c18 60%, #03060d 100%);
+        color: #f1f5f9;
+        font-family: 'Plus Jakarta Sans', sans-serif;
     }
 
+    .lords-top-ribbon {
+        height: 6px;
+        background: linear-gradient(90deg, #9e1b32 0%, #c5a059 50%, #9e1b32 100%);
+        margin-bottom: 1.5rem;
+        border-radius: 3px;
+    }
+
+    .main-title-container {
+        text-align: center;
+        padding: 0.5rem 0 1.5rem 0;
+        border-bottom: 1px solid rgba(197, 160, 89, 0.35);
+        margin-bottom: 2rem;
+    }
+
+    .sub-badge {
+        display: inline-block;
+        background: rgba(158, 27, 50, 0.35);
+        color: #e6ca85;
+        border: 1px solid rgba(197, 160, 89, 0.5);
+        padding: 5px 16px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin-bottom: 0.6rem;
+    }
+
+    .app-main-heading {
+        font-family: 'Playfair Display', serif;
+        font-size: 2.5rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        color: #ffffff;
+        margin: 0;
+        text-shadow: 0 4px 20px rgba(0,0,0,0.7);
+    }
+
+    .app-tagline {
+        color: #cbd5e1;
+        font-size: 0.98rem;
+        margin-top: 0.5rem;
+    }
+
+    /* Card Styling */
+    .player-card {
+        background: linear-gradient(135deg, rgba(13, 22, 41, 0.95) 0%, rgba(8, 14, 27, 0.98) 100%);
+        border: 1px solid rgba(197, 160, 89, 0.4);
+        border-radius: 14px;
+        padding: 1.5rem;
+        box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+    }
+
+    .player-name-banner {
+        font-family: 'Playfair Display', serif;
+        font-size: 2rem;
+        font-weight: 800;
+        color: #ffffff;
+        margin-bottom: 0.2rem;
+    }
+
+    .player-role-badge {
+        display: inline-block;
+        background: linear-gradient(135deg, #9e1b32 0%, #6e1323 100%);
+        color: #ffffff;
+        padding: 4px 12px;
+        border-radius: 6px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        margin-bottom: 0.8rem;
+    }
+
+    .match-confidence {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #00d27a;
+    }
+
+    .stat-pill {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(197, 160, 89, 0.25);
+        border-radius: 8px;
+        padding: 0.85rem;
+        margin-bottom: 0.6rem;
+    }
+
+    .stat-label {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #e6ca85;
+        font-weight: 700;
+    }
+
+    .stat-value {
+        font-size: 1rem;
+        color: #ffffff;
+        font-weight: 600;
+        margin-top: 3px;
+    }
+</style>
+<div class="lords-top-ribbon"></div>
+<div class="main-title-container">
+    <div class="sub-badge">AI Biometric Studio • 324 Indian Cricketers</div>
+    <h1 class="app-main-heading">INDIAN CRICKETERS FACE IDENTIFICATION</h1>
+    <p class="app-tagline">Deep Metric Recognition Powered by FaceNet (InceptionResnetV1) &amp; MTCNN</p>
+</div>
+""", unsafe_allow_html=True)
+
 # -------------------------------------------------------------------------
-# API Routes
+# Resource Loading
 # -------------------------------------------------------------------------
-@app.route("/")
-def index():
-    return render_template("index.html")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+DATABASE_PATH = os.path.join(DATA_DIR, "player_database.json")
+NPZ_PATH = os.path.join(MODELS_DIR, "cricket_face_embeddings.npz")
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "healthy",
-        "device": DEVICE,
-        "players_count": len(player_names),
-        "database_entries": len(player_database)
-    })
+@st.cache_resource(show_spinner="Initializing MTCNN detector & FaceNet neural network...")
+def get_models():
+    detector = MTCNN(
+        keep_all=True,
+        select_largest=False,
+        post_process=True,
+        min_face_size=30,
+        device=DEVICE
+    )
+    embedder = InceptionResnetV1(pretrained='vggface2').eval().to(DEVICE)
+    return detector, embedder
 
-@app.route("/api/samples")
-def get_samples():
-    """Returns pre-loaded quick test star players."""
-    samples = [
-        {"id": "shreyas", "name": "Shreyas Iyer", "file": "shreyas_iyer.jpg", "badge": "BATSMAN"},
-        {"id": "rohit", "name": "Rohit Sharma", "file": "rohit_sharma.jpg", "badge": "BATSMAN"},
-        {"id": "ekta", "name": "Ekta Bisht", "file": "ekta_bisht.jpg", "badge": "BOWLER"},
-        {"id": "bhuvi", "name": "Bhuvneshwar Kumar", "file": "bhuvneshwar_kumar.jpg", "badge": "BOWLER"},
-        {"id": "virat", "name": "Virat Kohli", "file": "virat_kohli.jpg", "badge": "BATSMAN"},
-        {"id": "dhoni", "name": "MS Dhoni", "file": "ms_dhoni.jpg", "badge": "WICKET-KEEPER"},
-        {"id": "sachin", "name": "Sachin Tendulkar", "file": "sachin_tendulkar.jpg", "badge": "BATSMAN"},
-        {"id": "smriti", "name": "Smriti Mandhana", "file": "smriti_mandhana.jpg", "badge": "BATSMAN"},
-        {"id": "bumrah", "name": "Jasprit Bumrah", "file": "jasprit_bumrah.jpg", "badge": "BOWLER"},
-        {"id": "kapil", "name": "Kapil Dev", "file": "kapil_dev.jpg", "badge": "ALL-ROUNDER"},
-        {"id": "hardik", "name": "Hardik Pandya", "file": "hardik_pandya.jpg", "badge": "ALL-ROUNDER"}
-    ]
-    return jsonify({"samples": samples})
+@st.cache_data(show_spinner="Loading 324 cricketers database & vectors...")
+def get_data():
+    database = {}
+    if os.path.exists(DATABASE_PATH):
+        with open(DATABASE_PATH, "r", encoding="utf-8") as f:
+            database = json.load(f)
 
-@app.route("/api/players")
-def get_players():
-    """Returns list of all 324 cricketers for the Legends Roster modal."""
-    roster = []
-    for folder, dossier in player_database.items():
-        roster.append({
-            "folder_name": folder,
-            "display_name": dossier.get("display_name", folder),
-            "role": dossier.get("role", "Cricketer"),
-            "role_badge": dossier.get("role_badge", "BATSMAN"),
-            "batting_style": dossier.get("batting_style", ""),
-            "bowling_style": dossier.get("bowling_style", ""),
-            "teams": dossier.get("key_teams", "")
-        })
-    roster.sort(key=lambda x: x["display_name"])
-    return jsonify({"total": len(roster), "players": roster})
+    centroids = None
+    exemplars = None
+    labels = None
+    players = []
+    exemplar_indices = []
 
-@app.route("/api/predict", methods=["POST"])
-def predict():
-    global player_centroids, player_exemplars, player_labels, player_names
+    if os.path.exists(NPZ_PATH):
+        npz = np.load(NPZ_PATH, allow_pickle=True)
+        centroids = npz['centroids']
+        exemplars = npz.get('exemplars', None)
+        labels = npz.get('labels', None)
+        players = list(npz['players'])
+        if exemplars is not None and labels is not None:
+            exemplar_indices = [np.where(labels == i)[0] for i in range(len(players))]
+
+    return database, centroids, exemplars, labels, players, exemplar_indices
+
+try:
+    detector, embedder = get_models()
+    database, centroids, exemplars, labels, players, exemplar_indices = get_data()
+    loaded_ok = True
+except Exception as e:
+    st.error(f"Error during initialization: {str(e)}")
+    st.code(traceback.format_exc())
+    loaded_ok = False
+
+# -------------------------------------------------------------------------
+# Sidebar Controls
+# -------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### ⚙️ Engine Settings")
+    min_confidence = st.slider("Strict Identification Threshold", 0.40, 0.90, 0.55, 0.05)
+    st.markdown(f"**Database:** `{len(players)}` Cricketers Indexed")
+    st.markdown(f"**Compute Device:** `{DEVICE.upper()}`")
     
-    # Reload embeddings if just built
-    if player_centroids is None and os.path.exists(NPZ_PATH):
-        load_resources()
-        
-    img = None
+    st.markdown("---")
+    st.markdown("### ⭐ Quick Test Stars")
+    sample_dir = os.path.join(BASE_DIR, "static", "samples")
+    sample_options = ["None (Upload Your Own)"]
+    if os.path.exists(sample_dir):
+        sample_files = [f for f in sorted(os.listdir(sample_dir)) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        sample_options.extend(sample_files)
     
-    # Check if multipart file or json base64
-    if 'image' in request.files:
-        file = request.files['image']
-        img_bytes = file.read()
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    elif request.is_json:
-        data = request.get_json()
-        b64_str = data.get("image", "")
-        if b64_str.startswith("data:image"):
-            b64_str = b64_str.split(",")[1]
-        img_bytes = base64.b64decode(b64_str)
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    elif "sample" in request.args:
-        sample_name = request.args.get("sample")
-        sample_path = os.path.join(BASE_DIR, "static", "samples", sample_name)
+    selected_sample = st.selectbox("Select Star Sample Photo", sample_options)
+
+    st.markdown("---")
+    with st.expander("🏛️ View All 324 Cricketers Roster"):
+        search_query = st.text_input("Search cricketer", "")
+        filtered = [p for p in players if search_query.lower() in p.lower()]
+        st.write(f"Showing {len(filtered)} players:")
+        st.dataframe(filtered, use_container_width=True, height=250)
+
+# -------------------------------------------------------------------------
+# Image Input & Biometric Processing
+# -------------------------------------------------------------------------
+col_input, col_results = st.columns([1, 1], gap="large")
+
+with col_input:
+    st.markdown("### 📸 Input Photograph")
+    input_mode = st.radio("Choose Input Method", ["File Upload", "Live Camera", "Quick Sample Star"], horizontal=True)
+    
+    input_image = None
+
+    if input_mode == "Quick Sample Star" and selected_sample != "None (Upload Your Own)":
+        sample_path = os.path.join(sample_dir, selected_sample)
         if os.path.exists(sample_path):
-            img = Image.open(sample_path).convert("RGB")
-            
-    if img is None:
-        return jsonify({"error": "No valid image provided"}), 400
-
-    orig_w, orig_h = img.size
-    
-    # Ultra-Fast Adaptive Downscaling for 10x Detection Throughput
-    max_dim = max(orig_w, orig_h)
-    if max_dim > 800:
-        scale = 800.0 / max_dim
-        detect_w = int(orig_w * scale)
-        detect_h = int(orig_h * scale)
-        detect_img = img.resize((detect_w, detect_h), Image.Resampling.BILINEAR)
+            input_image = Image.open(sample_path).convert("RGB")
+    elif input_mode == "Live Camera":
+        cam_pic = st.camera_input("Capture Face from Webcam")
+        if cam_pic:
+            input_image = Image.open(cam_pic).convert("RGB")
     else:
-        scale = 1.0
-        detect_img = img
+        uploaded_file = st.file_uploader("Upload Cricket Player Photo (JPG, PNG, WEBP)", type=["jpg", "jpeg", "png", "webp"])
+        if uploaded_file:
+            input_image = Image.open(uploaded_file).convert("RGB")
+
+def match_face(embedding):
+    """
+    Balanced Centroid + Top Exemplar scoring (50% Centroid + 35% Top-1 + 15% Top-2)
+    Prevents single-outlier false positives.
+    """
+    centroid_sims = np.dot(centroids, embedding)
     
-    # Run MTCNN Face Detection
-    boxes, probs = mtcnn_detector.detect(detect_img)
-    
-    detections = []
-    
-    if boxes is not None and len(boxes) > 0:
-        for idx, (box, prob) in enumerate(zip(boxes, probs)):
-            if prob is None or prob < 0.70:
-                continue
-                
-            # Scale coordinates back up to full image resolution
-            if scale != 1.0:
-                raw_box = [coord / scale for coord in box]
+    if exemplars is not None and len(exemplar_indices) == len(players):
+        all_ex_sims = np.dot(exemplars, embedding)
+        top1_sims = np.zeros(len(players), dtype=np.float32)
+        top2_sims = np.zeros(len(players), dtype=np.float32)
+        
+        for idx, ex_idx in enumerate(exemplar_indices):
+            if len(ex_idx) == 0:
+                top1_sims[idx] = centroid_sims[idx]
+                top2_sims[idx] = centroid_sims[idx]
+            elif len(ex_idx) == 1:
+                top1_sims[idx] = all_ex_sims[ex_idx[0]]
+                top2_sims[idx] = all_ex_sims[ex_idx[0]]
             else:
-                raw_box = box
+                p_sims = np.sort(all_ex_sims[ex_idx])
+                top1_sims[idx] = p_sims[-1]
+                top2_sims[idx] = 0.5 * (p_sims[-1] + p_sims[-2])
                 
-            x1, y1, x2, y2 = [int(coord) for coord in raw_box]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(orig_w, x2), min(orig_h, y2)
-            
-            # Minimum face dimension filter to eliminate microscopic noise
-            if (x2 - x1) < 25 or (y2 - y1) < 25:
-                continue
+        final_scores = 0.50 * centroid_sims + 0.35 * top1_sims + 0.15 * top2_sims
+    else:
+        final_scores = centroid_sims
+        
+    best_idx = int(np.argmax(final_scores))
+    best_score = float(final_scores[best_idx])
+    return best_idx, best_score
+
+if loaded_ok and input_image is not None:
+    # Downscale large images for sub-second MTCNN detection
+    orig_w, orig_h = input_image.size
+    max_dim = 900
+    if max(orig_w, orig_h) > max_dim:
+        scale = max_dim / max(orig_w, orig_h)
+        proc_img = input_image.resize((int(orig_w * scale), int(orig_h * scale)), Image.Resampling.BILINEAR)
+    else:
+        proc_img = input_image
+
+    with st.spinner("Extracting facial biometric features & searching 324 legends..."):
+        boxes, probs = detector.detect(proc_img)
+        
+        detected_faces = []
+        annotated_image = proc_img.copy()
+        draw = ImageDraw.Draw(annotated_image)
+
+        if boxes is not None and len(boxes) > 0:
+            for i, box in enumerate(boxes):
+                prob = probs[i] if probs is not None else 1.0
+                if prob < 0.70:
+                    continue
                 
-            # Standardized face extraction with margin=14 matching FaceNet VGGFace2
-            try:
-                face_tensor = extract_face(img, [x1, y1, x2, y2], image_size=160, margin=14)
-                face_tensor = fixed_image_standardization(face_tensor).unsqueeze(0).to(DEVICE)
-            except Exception:
-                face_crop = img.crop((x1, y1, x2, y2)).resize((160, 160))
-                face_tensor = (torch.tensor(np.array(face_crop).astype(np.float32)).permute(2, 0, 1) - 127.5) / 128.0
+                face_tensor = extract_face(proc_img, box, image_size=160, margin=14)
+                if face_tensor is None:
+                    continue
+                
+                face_tensor = fixed_image_standardization(face_tensor)
                 face_tensor = face_tensor.unsqueeze(0).to(DEVICE)
-            
-            with torch.no_grad():
-                emb = embedding_net(face_tensor)
-                emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
-                emb_np = emb.squeeze().cpu().numpy()
                 
-            best_player = "Unknown"
-            best_sim = 0.0
-            
-            if player_centroids is not None and len(player_centroids) > 0:
-                c_sims = np.dot(player_centroids, emb_np)
-                
-                # Balanced Biometric Matcher: 50% Centroid + 35% Top-1 NN + 15% Top-2 Mean
-                if player_exemplars is not None and len(player_exemplars) > 0 and len(player_exemplar_indices) == len(player_names):
-                    e_sims = np.dot(player_exemplars, emb_np)
-                    num_p = len(player_names)
-                    player_scores = np.zeros(num_p, dtype=np.float32)
+                with torch.no_grad():
+                    raw_emb = embedder(face_tensor).cpu().numpy()[0]
+                    norm = np.linalg.norm(raw_emb)
+                    emb = raw_emb / (norm + 1e-9)
                     
-                    for p_idx in range(num_p):
-                        p_ex = player_exemplar_indices[p_idx]
-                        if len(p_ex) > 0:
-                            sorted_ex = np.sort(e_sims[p_ex])[::-1]
-                            top1 = float(sorted_ex[0])
-                            top2 = float(np.mean(sorted_ex[:min(2, len(sorted_ex))]))
-                            cent = float(c_sims[p_idx])
-                            player_scores[p_idx] = 0.50 * cent + 0.35 * top1 + 0.15 * top2
-                        else:
-                            player_scores[p_idx] = c_sims[p_idx]
+                match_idx, score = match_face(emb)
+                player_raw_name = players[match_idx]
+                
+                clean_key = player_raw_name.lower().replace(' ', '_')
+                info = database.get(clean_key, {})
+                display_name = info.get("display_name", player_raw_name.replace('_', ' ').title())
+
+                detected_faces.append({
+                    "box": box,
+                    "prob": prob,
+                    "score": score,
+                    "player_key": clean_key,
+                    "display_name": display_name,
+                    "info": info
+                })
+
+                x1, y1, x2, y2 = [int(v) for v in box]
+                color = "#00d27a" if score >= min_confidence else "#eab308"
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
+                label_text = f"{display_name} ({score * 100:.1f}%)"
+                draw.text((x1 + 4, max(4, y1 - 22)), label_text, fill=color)
+
+    with col_input:
+        st.image(annotated_image, caption=f"Analysis Complete: {len(detected_faces)} Face(s) Detected", use_container_width=True)
+
+    with col_results:
+        st.markdown("### 🏆 Identification Dossier")
+        
+        if len(detected_faces) == 0:
+            st.warning("⚠️ No human face detected in this photograph. Please upload a clear photo with visible facial features.")
+        else:
+            for idx, item in enumerate(detected_faces):
+                score = item["score"]
+                info = item["info"]
+                d_name = item["display_name"]
+                
+                if score < min_confidence:
+                    st.error(f"⚠️ Face #{idx+1}: Low confidence match ({score*100:.1f}%). This cricketer may not be in the database.")
+                
+                st.markdown(f"""
+                <div class="player-card">
+                    <div class="player-role-badge">{info.get("role", "INDIAN CRICKETER")}</div>
+                    <div class="player-name-banner">{d_name}</div>
+                    <p style="color: #cbd5e1; font-size: 0.9rem; margin-bottom: 0.8rem;">
+                        <strong>Active Era:</strong> {info.get("active_era", "International & Domestic Circuit")}
+                    </p>
+                    <div style="margin: 0.8rem 0;">
+                        <span style="color: #cbd5e1; font-size: 0.9rem;">Neural Metric Confidence: </span>
+                        <span class="match-confidence">{score * 100:.1f}%</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.markdown("")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"""
+                    <div class="stat-pill">
+                        <div class="stat-label">🏏 Batting Discipline</div>
+                        <div class="stat-value">{info.get("batting_style", "Right-hand bat")}</div>
+                    </div>
+                    <div class="stat-pill">
+                        <div class="stat-label">🎯 Bowling Specialization</div>
+                        <div class="stat-value">{info.get("bowling_style", "Right-arm medium")}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"""
+                    <div class="stat-pill">
+                        <div class="stat-label">📊 Career Matches</div>
+                        <div class="stat-value">{info.get("career_matches", "International & Domestic")}</div>
+                    </div>
+                    <div class="stat-pill">
+                        <div class="stat-label">🏟️ Representative Teams</div>
+                        <div class="stat-value">{info.get("teams", "India National Cricket Team")}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with st.expander("🌟 Historic Highlights & Performance", expanded=True):
+                    st.markdown(f"**⭐ Best Historic Performance:** {info.get('best_performance', 'Match-winning performance')}")
+                    highlights = info.get("highlights", [])
+                    if isinstance(highlights, list) and len(highlights) > 0:
+                        st.markdown("**🎖️ Honours & Milestones:**")
+                        for h in highlights:
+                            st.markdown(f"- {h}")
                             
-                    best_idx = int(np.argmax(player_scores))
-                    best_sim = float(player_scores[best_idx])
-                    best_player = player_names[best_idx]
-                else:
-                    best_idx = int(np.argmax(c_sims))
-                    best_sim = float(c_sims[best_idx])
-                    best_player = player_names[best_idx]
-                        
-            conf_score = calibrate_confidence(best_sim)
-            
-            # If similarity is too low, treat as Unknown face not in database
-            if best_sim < 0.35:
-                dossier = {
-                    "id": "unknown",
-                    "display_name": "Unknown Player",
-                    "role": "Not in 324 Database",
-                    "role_badge": "UNKNOWN",
-                    "active_era": "Unrecognized in Database",
-                    "batting_style": "Unknown",
-                    "bowling_style": "Unknown",
-                    "career_matches": "Not in database",
-                    "key_teams": "Unmatched",
-                    "best_performance": "No match found in 324 Indian cricketer database",
-                    "career_highlights": [
-                        "This detected face does not match any of the 324 Indian cricketers in our database.",
-                        "Ensure the photo shows a supported Indian national, legendary, or IPL cricketer.",
-                        "Use the Legends Roster to browse all 324 supported players."
-                    ],
-                    "biography": "A human face was detected, but its facial embedding does not match any of the 324 Indian cricketers in our database. Please verify the player's name in the Legends Roster or upload a clearer photo."
-                }
-                player_display = "Unknown / Not in Database"
-                is_low_conf = True
-            else:
-                dossier = get_player_dossier(best_player)
-                player_display = dossier.get("display_name", best_player)
-                is_low_conf = conf_score < 0.45
-            
-            detections.append({
-                "face_index": idx,
-                "box": [x1, y1, x2 - x1, y2 - y1],
-                "box_coords": [x1, y1, x2, y2],
-                "player_name": player_display,
-                "folder_name": best_player,
-                "confidence": round(conf_score * 100, 1),
-                "raw_similarity": round(best_sim, 4),
-                "is_low_confidence": is_low_conf,
-                "dossier": dossier
-            })
-
-    # Sort detections so primary face is highest confidence
-    detections.sort(key=lambda d: d["confidence"], reverse=True)
-    
-    return jsonify({
-        "success": True,
-        "image_size": [orig_w, orig_h],
-        "total_faces": len(detections),
-        "detections": detections,
-        "message": "Detection successful" if len(detections) > 0 else "No human faces detected in the image."
-    })
-
-# -------------------------------------------------------------------------
-# Main Execution for Local and Render
-# -------------------------------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"[+] Starting Cricket Face Identification server on 0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
-
+                with st.expander("📖 Biography & Legacy", expanded=False):
+                    st.write(info.get("biography", "A proud member of the Indian cricket fraternity."))
+else:
+    with col_results:
+        st.info("👈 Upload a photograph, take a webcam photo, or select a Quick Test Star to begin face identification.")

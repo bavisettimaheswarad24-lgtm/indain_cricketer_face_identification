@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Indian Cricketers Face Identification</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%230a1324' stroke='%23c5a059' stroke-width='4'/><path d='M30,50 Q50,22 70,50 Q50,78 30,50' fill='none' stroke='%23c5a059' stroke-width='3'/><circle cx='50' cy='50' r='8' fill='%239e1b32'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <!-- Lord's Iconic Heritage Claret & Gold Ribbon -->
+  <div class="lords-heritage-ribbon"></div>
+
+  <!-- Stadium Atmosphere Backdrop -->
+  <div class="stadium-backdrop"></div>
+  <div class="vignette-overlay"></div>
+  <div class="ambient-glow glow-gold"></div>
+  <div class="ambient-glow glow-turf"></div>
+
+  <!-- Executive Header Navbar -->
+  <header class="navbar">
+    <div class="nav-left">
+      <div class="brand-crest">
+        <span class="crest-icon">🏛️</span>
+      </div>
+      <div class="brand-titles">
+        <div class="brand-meta-tag">AI-POWERED FACE RECOGNITION</div>
+        <h1 class="brand-name">INDIAN CRICKETERS FACE IDENTIFICATION</h1>
+        <p class="brand-tagline">Deep Metric Facial Identification Across 324 Indian International &amp; Domestic Legends</p>
+      </div>
+    </div>
+    <div class="nav-right">
+      <div class="status-pill">
+        <span class="pulsing-beacon"></span>
+        <span class="status-label">324 Players Verified</span>
+      </div>
+      <button class="btn-roster" id="openRosterBtn">
+        <span class="icon">📜</span>
+        <span>Legends Roster</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Application Stage -->
+  <main class="main-container">
+    <!-- Left Column: Input & Detection Studio -->
+    <section class="panel studio-panel">
+      <div class="panel-header">
+        <div class="header-icon-title">
+          <span class="header-icon">📷</span>
+          <div>
+            <h2>Input &amp; Detection Studio</h2>
+            <p class="panel-subcaption">Upload player media, capture live footage, or select historical star samples</p>
+          </div>
+        </div>
+        <div class="tabs-nav">
+          <button class="tab-btn active" data-tab="uploadTab">
+            <span class="tab-icon">📥</span>
+            <span>Upload Photo</span>
+          </button>
+          <button class="tab-btn" data-tab="cameraTab">
+            <span class="tab-icon">📹</span>
+            <span>Live Camera</span>
+          </button>
+          <button class="tab-btn" data-tab="quickStarsTab">
+            <span class="tab-icon">⭐</span>
+            <span>Quick Test Stars</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Tab Content 1: Upload Photo -->
+      <div class="tab-pane active" id="uploadTab">
+        <div class="drop-zone" id="dropZone">
+          <div class="drop-zone-icon-bubble">
+            <span class="stadium-mini-icon">🏟️</span>
+          </div>
+          <h3 class="drop-title">Drag &amp; Drop Player Photograph Here</h3>
+          <p class="drop-subtitle">High-fidelity analysis supports JPG, PNG, WEBP, and JPEG • Or browse from device</p>
+          <button class="btn-select-photo" id="selectPhotoBtn">
+            <span>Select Photograph</span>
+          </button>
+          <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden>
+        </div>
+      </div>
+
+      <!-- Tab Content 2: Live Camera -->
+      <div class="tab-pane" id="cameraTab">
+        <div class="camera-stage">
+          <video id="webcamVideo" autoplay playsinline muted></video>
+          <canvas id="cameraCanvas" hidden></canvas>
+          <div class="camera-controls">
+            <button class="btn-camera-snap" id="snapPhotoBtn">
+              <span class="snap-icon">📸</span>
+              <span>Capture &amp; Identify</span>
+            </button>
+            <button class="btn-camera-toggle" id="toggleCameraBtn">Start Camera</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab Content 3: Quick Test Stars -->
+      <div class="tab-pane" id="quickStarsTab">
+        <div class="quick-stars-caption">Select an iconic cricketer to test instant 512-D neural identification:</div>
+        <div class="quick-stars-grid" id="quickStarsGrid">
+          <div class="loading-stars">Loading Star Dossiers...</div>
+        </div>
+      </div>
+
+      <!-- Detection Viewer Screen (Image + Bounding Boxes) -->
+      <div class="detection-viewer-container" id="viewerContainer">
+        <div class="viewer-wrapper" id="viewerWrapper">
+          <!-- Empty State (Shown before any photo is chosen) -->
+          <div class="viewer-empty-state" id="viewerEmptyState">
+            <div class="empty-crest-ring">
+              <span>🏏</span>
+            </div>
+            <h4 class="empty-title">Awaiting Player Photograph</h4>
+            <p class="empty-desc">Upload a cricketer photo above or choose a Quick Test Star to run neural recognition.</p>
+          </div>
+
+          <div class="image-stage-wrap" id="imageStageWrap">
+            <img id="previewImage" alt="Cricket Player" style="display: none;" />
+            <div class="bbox-layer" id="bboxLayer"></div>
+          </div>
+
+          <!-- Carousel / Multi-face Navigation Arrows -->
+          <button class="nav-arrow prev-arrow" id="prevFaceBtn" title="Previous Detected Face" disabled>
+            <span>&lt;</span>
+          </button>
+          <button class="nav-arrow next-arrow" id="nextFaceBtn" title="Next Detected Face" disabled>
+            <span>&gt;</span>
+          </button>
+
+          <!-- Visual Search Floating Action Button -->
+          <button class="btn-visual-search" id="visualSearchBtn">
+            <span class="search-lens-icon">🔍</span>
+            <span>Visual Search</span>
+            <span class="detection-badge-count" id="detectionCountBadge">0</span>
+          </button>
+        </div>
+        <div class="viewer-status-bar" id="viewerStatusBar">
+          <span class="status-msg" id="detectionStatusMsg">Awaiting photo selection...</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Player Intelligence Dossier -->
+    <section class="panel dossier-panel">
+      <!-- Player Header Card -->
+      <div class="player-identity-header">
+        <div class="avatar-container">
+          <div class="avatar-ring">
+            <img id="playerAvatar" src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230f1c35'/><text x='50' y='60' font-size='38' text-anchor='middle' fill='%23c5a059'>🏏</text></svg>" alt="Player Avatar">
+          </div>
+        </div>
+        <div class="identity-meta">
+          <div class="badge-row">
+            <span class="role-pill-badge" id="playerRoleBadge">READY</span>
+            <span class="official-verified-seal" id="officialSeal">✓ 324 ARCHIVE</span>
+          </div>
+          <h2 class="player-name-heading" id="playerNameHeading">SELECT OR UPLOAD A PLAYER</h2>
+          <p class="player-era-text" id="playerEraText">Active Era: Database Ready (324 Cricketers)</p>
+        </div>
+      </div>
+
+      <!-- Confidence Match & Database Alert Row -->
+      <div class="confidence-section">
+        <div class="confidence-card">
+          <div class="confidence-header">
+            <div class="confidence-title-wrap">
+              <span class="confidence-title">Neural Metric Match Confidence</span>
+              <span class="confidence-sub">Cosine similarity against 324 player centroids</span>
+            </div>
+            <span class="confidence-value" id="confidenceValue">0.0%</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Low Confidence Warning Box (Displayed when confidence < 45% or Unknown) -->
+        <div class="low-confidence-alert" id="lowConfidenceAlert" style="display: none;">
+          <span class="alert-icon">⚠️</span>
+          <div class="alert-body">
+            <strong>Very low confidence</strong> — this player may not be in our database.
+            <p>Try using the <a href="#" id="browseLegendsLink">Legends Roster</a> to browse supported players.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2x2 Specifications Grid -->
+      <div class="specs-grid">
+        <div class="spec-card">
+          <span class="spec-label">BATTING DISCIPLINE</span>
+          <span class="spec-value" id="battingStyleVal">—</span>
+        </div>
+        <div class="spec-card">
+          <span class="spec-label">BOWLING SPECIALIZATION</span>
+          <span class="spec-value" id="bowlingStyleVal">—</span>
+        </div>
+        <div class="spec-card">
+          <span class="spec-label">CAREER MATCHES</span>
+          <span class="spec-value" id="careerMatchesVal">—</span>
+        </div>
+        <div class="spec-card">
+          <span class="spec-label">REPRESENTATIVE TEAMS</span>
+          <span class="spec-value" id="keyTeamsVal">—</span>
+        </div>
+      </div>
+
+      <!-- Best Performance Card -->
+      <div class="dossier-card card-best-performance">
+        <div class="card-title-row">
+          <span class="card-icon gold">⭐</span>
+          <h3 class="card-title">BEST HISTORIC PERFORMANCE</h3>
+        </div>
+        <p class="card-text" id="bestPerformanceVal">Upload a cricketer image or select a Quick Test Star to inspect defining international encounters.</p>
+      </div>
+
+      <!-- Career Highlights Card -->
+      <div class="dossier-card card-highlights">
+        <div class="card-title-row">
+          <span class="card-icon claret">🎖️</span>
+          <h3 class="card-title">CAREER HONOURS &amp; MILESTONES</h3>
+        </div>
+        <ul class="highlights-list" id="highlightsList">
+          <li><span class="trophy-emoji">🏆</span> <span>Upload a photo or select a Quick Test Star to generate intelligence dossier.</span></li>
+        </ul>
+      </div>
+
+      <!-- Biography & Legacy Card -->
+      <div class="dossier-card card-biography">
+        <div class="card-title-row">
+          <span class="card-icon gold">📖</span>
+          <h3 class="card-title">BIOGRAPHY &amp; LEGACY</h3>
+        </div>
+        <p class="card-text bio-text" id="biographyVal">Our deep neural network identifies Indian cricket legends, modern champions, and historic players across Tests, ODIs, T20Is, and domestic championships using deep metric facial embeddings.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Legends Roster Modal (324 Players) -->
+  <div class="modal-backdrop" id="rosterModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <span class="modal-title-icon">🏛️</span>
+          <div>
+            <h2>Indian Cricket Legends Roster (324 Players)</h2>
+            <p class="modal-subtext">Verified archival profiles across Men's &amp; Women's International &amp; Domestic Cricket</p>
+          </div>
+        </div>
+        <button class="modal-close-btn" id="closeRosterBtn">&times;</button>
+      </div>
+      <div class="modal-toolbar">
+        <div class="search-input-wrap">
+          <span class="search-input-icon">🔍</span>
+          <input type="text" id="rosterSearchInput" placeholder="Search by cricketer name, bowling style, representative team...">
+        </div>
+        <div class="filter-pills">
+          <button class="filter-pill active" data-filter="all">All (324)</button>
+          <button class="filter-pill" data-filter="BATSMAN">Batsmen</button>
+          <button class="filter-pill" data-filter="BOWLER">Bowlers</button>
+          <button class="filter-pill" data-filter="ALL-ROUNDER">All-Rounders</button>
+          <button class="filter-pill" data-filter="WICKET-KEEPER">Wicket-Keepers</button>
+        </div>
+      </div>
+      <div class="modal-roster-list" id="modalRosterList">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-card">
+      <div class="lords-crest-spinner"></div>
+      <h3 class="loading-title">Neural Metric Recognition in Progress</h3>
+      <p class="loading-subtitle">Extracting 512-Dimensional Face Vectors &amp; Matching Against 324 Legends Database...</p>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
